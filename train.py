@@ -56,6 +56,21 @@ def _metrics_from_confusion(tp, fp, tn, fn):
     mcc = _safe_div((tp * tn - fp * fn), denom) if denom != 0 else 0.0
     return precision, recall, f1, mcc
 
+def _compute_single_end_metrics(y_true_batch, y_prob_batch, threshold=0.5):
+    """
+    计算抗原端（epitope）和抗体端（paratope）的单端指标。
+    """
+    # 抗原端：沿抗体轴(dim=2)取max -> (batch, ag_len)
+    ag_true = y_true_batch.amax(dim=2).reshape(-1)
+    ag_prob = y_prob_batch.amax(dim=2).reshape(-1)
+
+    # 抗体端：沿抗原轴(dim=1)取max -> (batch, ab_len)
+    ab_true = y_true_batch.amax(dim=1).reshape(-1)
+    ab_prob = y_prob_batch.amax(dim=1).reshape(-1)
+
+    return (ag_true, ag_prob), (ab_true, ab_prob)
+
+
 def _safe_roc_auc(y_true_flat, y_prob_flat):
     # y_true_flat: {0,1}, y_prob_flat: [0,1]
     # roc_auc_score requires both classes exist; otherwise return nan.
@@ -194,11 +209,23 @@ def main(device_override=None, ag_path=None, ab_path=None, label_path=None):
             {'split': 'train', 'loss': train_last['loss'], 'accuracy': train_last['accuracy'],
              'precision': train_last['precision'], 'recall': train_last['recall'], 'f1': train_last['f1'], 'mcc': train_last['mcc'],
              'auroc': train_last.get('auroc', float('nan')), 'auprc': train_last.get('auprc', float('nan')),
-             'tp': train_last['tp'], 'fp': train_last['fp'], 'tn': train_last['tn'], 'fn': train_last['fn']},
+             'tp': train_last['tp'], 'fp': train_last['fp'], 'tn': train_last['tn'], 'fn': train_last['fn'],
+             'ag_precision': train_last['ag_precision'], 'ag_recall': train_last['ag_recall'], 'ag_f1': train_last['ag_f1'], 'ag_mcc': train_last['ag_mcc'],
+             'ag_auroc': train_last.get('ag_auroc', float('nan')), 'ag_auprc': train_last.get('ag_auprc', float('nan')),
+             'ag_tp': train_last['ag_tp'], 'ag_fp': train_last['ag_fp'], 'ag_tn': train_last['ag_tn'], 'ag_fn': train_last['ag_fn'],
+             'ab_precision': train_last['ab_precision'], 'ab_recall': train_last['ab_recall'], 'ab_f1': train_last['ab_f1'], 'ab_mcc': train_last['ab_mcc'],
+             'ab_auroc': train_last.get('ab_auroc', float('nan')), 'ab_auprc': train_last.get('ab_auprc', float('nan')),
+             'ab_tp': train_last['ab_tp'], 'ab_fp': train_last['ab_fp'], 'ab_tn': train_last['ab_tn'], 'ab_fn': train_last['ab_fn']},
             {'split': 'val', 'loss': val_last['loss'], 'accuracy': val_last['accuracy'],
              'precision': val_last['precision'], 'recall': val_last['recall'], 'f1': val_last['f1'], 'mcc': val_last['mcc'],
              'auroc': val_last.get('auroc', float('nan')), 'auprc': val_last.get('auprc', float('nan')),
-             'tp': val_last['tp'], 'fp': val_last['fp'], 'tn': val_last['tn'], 'fn': val_last['fn']},
+             'tp': val_last['tp'], 'fp': val_last['fp'], 'tn': val_last['tn'], 'fn': val_last['fn'],
+             'ag_precision': val_last['ag_precision'], 'ag_recall': val_last['ag_recall'], 'ag_f1': val_last['ag_f1'], 'ag_mcc': val_last['ag_mcc'],
+             'ag_auroc': val_last.get('ag_auroc', float('nan')), 'ag_auprc': val_last.get('ag_auprc', float('nan')),
+             'ag_tp': val_last['ag_tp'], 'ag_fp': val_last['ag_fp'], 'ag_tn': val_last['ag_tn'], 'ag_fn': val_last['ag_fn'],
+             'ab_precision': val_last['ab_precision'], 'ab_recall': val_last['ab_recall'], 'ab_f1': val_last['ab_f1'], 'ab_mcc': val_last['ab_mcc'],
+             'ab_auroc': val_last.get('ab_auroc', float('nan')), 'ab_auprc': val_last.get('ab_auprc', float('nan')),
+             'ab_tp': val_last['ab_tp'], 'ab_fp': val_last['ab_fp'], 'ab_tn': val_last['ab_tn'], 'ab_fn': val_last['ab_fn']},
         ])
         summary_df.to_csv(summary_path, index=False)
 
@@ -251,7 +278,9 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
         metrics_writer.writerow([
             'epoch', 'split', 'loss', 'accuracy', 'precision', 'recall', 'f1', 'mcc',
             'auroc', 'auprc',
-            'tp', 'fp', 'tn', 'fn'
+            'tp', 'fp', 'tn', 'fn',
+            'ag_precision', 'ag_recall', 'ag_f1', 'ag_mcc', 'ag_auroc', 'ag_auprc', 'ag_tp', 'ag_fp', 'ag_tn', 'ag_fn',
+            'ab_precision', 'ab_recall', 'ab_f1', 'ab_mcc', 'ab_auroc', 'ab_auprc', 'ab_tp', 'ab_fp', 'ab_tn', 'ab_fn'
         ])
 
     if BinaryAUROC is None or BinaryAveragePrecision is None:
@@ -271,9 +300,15 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
         train_y_accuracies_epoch = []
         
         train_tp = train_fp = train_tn = train_fn = 0
+        train_ag_tp = train_ag_fp = train_ag_tn = train_ag_fn = 0
+        train_ab_tp = train_ab_fp = train_ab_tn = train_ab_fn = 0
         if use_gpu_metrics:
             train_auroc_metric = BinaryAUROC(thresholds=metric_thresholds).to(device)
             train_auprc_metric = BinaryAveragePrecision(thresholds=metric_thresholds).to(device)
+            train_ag_auroc_metric = BinaryAUROC(thresholds=metric_thresholds).to(device)
+            train_ag_auprc_metric = BinaryAveragePrecision(thresholds=metric_thresholds).to(device)
+            train_ab_auroc_metric = BinaryAUROC(thresholds=metric_thresholds).to(device)
+            train_ab_auprc_metric = BinaryAveragePrecision(thresholds=metric_thresholds).to(device)
         else:
             train_y_scores_epoch = []
             train_y_true_epoch = []
@@ -302,6 +337,13 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
             train_auroc_metric.update(result_prob.reshape(-1), y_batch.reshape(-1).int())
             train_auprc_metric.update(result_prob.reshape(-1), y_batch.reshape(-1).int())
 
+            (ag_true, ag_prob), (ab_true, ab_prob) = _compute_single_end_metrics(y_batch, result_prob, threshold)
+            if use_gpu_metrics:
+                train_ag_auroc_metric.update(ag_prob, ag_true.int())
+                train_ag_auprc_metric.update(ag_prob, ag_true.int())
+                train_ab_auroc_metric.update(ab_prob, ab_true.int())
+                train_ab_auprc_metric.update(ab_prob, ab_true.int())
+
             # Calculate the training set accuracy
             train_accuracy = accuracy(y_batch, result_prob, device, threshold)
             train_accuracies_epoch.append(train_accuracy)
@@ -315,6 +357,12 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
             train_fp += fp
             train_tn += tn
             train_fn += fn
+
+            ag_tp, ag_fp, ag_tn, ag_fn = _compute_confusion(ag_true, ag_prob, threshold)
+            train_ag_tp += ag_tp; train_ag_fp += ag_fp; train_ag_tn += ag_tn; train_ag_fn += ag_fn
+            
+            ab_tp, ab_fp, ab_tn, ab_fn = _compute_confusion(ab_true, ab_prob, threshold)
+            train_ab_tp += ab_tp; train_ab_fp += ab_fp; train_ab_tn += ab_tn; train_ab_fn += ab_fn
             
 
         train_losses.append(sum(train_losses_epoch) / len(train_losses_epoch))
@@ -330,14 +378,20 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
         val_accuracies_epoch = []
         val_x_accuracies_epoch = []
         val_y_accuracies_epoch = []
+        val_tp = val_fp = val_tn = val_fn = 0
+        val_ag_tp = val_ag_fp = val_ag_tn = val_ag_fn = 0
+        val_ab_tp = val_ab_fp = val_ab_tn = val_ab_fn = 0
         if use_gpu_metrics:
             val_auroc_metric = BinaryAUROC(thresholds=metric_thresholds).to(device)
             val_auprc_metric = BinaryAveragePrecision(thresholds=metric_thresholds).to(device)
+            val_ag_auroc_metric = BinaryAUROC(thresholds=metric_thresholds).to(device)
+            val_ag_auprc_metric = BinaryAveragePrecision(thresholds=metric_thresholds).to(device)
+            val_ab_auroc_metric = BinaryAUROC(thresholds=metric_thresholds).to(device)
+            val_ab_auprc_metric = BinaryAveragePrecision(thresholds=metric_thresholds).to(device)
         else:
             y_scores_epoch = []
             y_true_epoch = []
 
-        val_tp = val_fp = val_tn = val_fn = 0
         with torch.no_grad():
             for X_ag_val, X_ab_val, y_val_batch in val_loader:
                 X_ag_val = X_ag_val.to(device, non_blocking=pin_memory)
@@ -352,6 +406,13 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
                     # For AUROC/AUPRC (GPU-only)
                     val_auroc_metric.update(result_val_prob.reshape(-1), y_val_batch.reshape(-1).int())
                     val_auprc_metric.update(result_val_prob.reshape(-1), y_val_batch.reshape(-1).int())
+
+                    (ag_true, ag_prob), (ab_true, ab_prob) = _compute_single_end_metrics(y_val_batch, result_val_prob, threshold)
+                    if use_gpu_metrics:
+                        val_ag_auroc_metric.update(ag_prob, ag_true.int())
+                        val_ag_auprc_metric.update(ag_prob, ag_true.int())
+                        val_ab_auroc_metric.update(ab_prob, ab_true.int())
+                        val_ab_auprc_metric.update(ab_prob, ab_true.int())
 
                     val_loss = criterion(result_val, y_val_batch)
 
@@ -371,36 +432,47 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
                 val_tn += tn
                 val_fn += fn
 
+                ag_tp, ag_fp, ag_tn, ag_fn = _compute_confusion(ag_true, ag_prob, threshold)
+                val_ag_tp += ag_tp; val_ag_fp += ag_fp; val_ag_tn += ag_tn; val_ag_fn += ag_fn
+                
+                ab_tp, ab_fp, ab_tn, ab_fn = _compute_confusion(ab_true, ab_prob, threshold)
+                val_ab_tp += ab_tp; val_ab_fp += ab_fp; val_ab_tn += ab_tn; val_ab_fn += ab_fn
+
         val_losses.append(sum(val_losses_epoch) / len(val_losses_epoch))
         val_accuracies.append(sum(val_accuracies_epoch) / len(val_accuracies_epoch))
         val_x_accuracies.append(sum(val_x_accuracies_epoch) / len(val_x_accuracies_epoch))
         val_y_accuracies.append(sum(val_y_accuracies_epoch) / len(val_y_accuracies_epoch))
 
-        train_precision, train_recall, train_f1, train_mcc = _metrics_from_confusion(
-            train_tp, train_fp, train_tn, train_fn
-        )
-        val_precision, val_recall, val_f1, val_mcc = _metrics_from_confusion(
-            val_tp, val_fp, val_tn, val_fn
-        )
+        train_precision, train_recall, train_f1, train_mcc = _metrics_from_confusion(train_tp, train_fp, train_tn, train_fn)
+        val_precision, val_recall, val_f1, val_mcc = _metrics_from_confusion(val_tp, val_fp, val_tn, val_fn)
+
+        train_ag_precision, train_ag_recall, train_ag_f1, train_ag_mcc = _metrics_from_confusion(train_ag_tp, train_ag_fp, train_ag_tn, train_ag_fn)
+        train_ab_precision, train_ab_recall, train_ab_f1, train_ab_mcc = _metrics_from_confusion(train_ab_tp, train_ab_fp, train_ab_tn, train_ab_fn)
+
+        val_ag_precision, val_ag_recall, val_ag_f1, val_ag_mcc = _metrics_from_confusion(val_ag_tp, val_ag_fp, val_ag_tn, val_ag_fn)
+        val_ab_precision, val_ab_recall, val_ab_f1, val_ab_mcc = _metrics_from_confusion(val_ab_tp, val_ab_fp, val_ab_tn, val_ab_fn)
+
+        def _safe_compute(metric):
+            try:
+                return float(metric.compute().item())
+            except Exception:
+                return float('nan')
 
         # AUROC/AUPRC (GPU-only)
-        try:
-            auroc_val = float(val_auroc_metric.compute().item())
-        except Exception:
-            auroc_val = float('nan')
-        try:
-            auprc_val = float(val_auprc_metric.compute().item())
-        except Exception:
-            auprc_val = float('nan')
+        auroc_val = _safe_compute(val_auroc_metric)
+        auprc_val = _safe_compute(val_auprc_metric)
+        auroc_train = _safe_compute(train_auroc_metric)
+        auprc_train = _safe_compute(train_auprc_metric)
 
-        try:
-            auroc_train = float(train_auroc_metric.compute().item())
-        except Exception:
-            auroc_train = float('nan')
-        try:
-            auprc_train = float(train_auprc_metric.compute().item())
-        except Exception:
-            auprc_train = float('nan')
+        auroc_ag_val = _safe_compute(val_ag_auroc_metric)
+        auprc_ag_val = _safe_compute(val_ag_auprc_metric)
+        auroc_ag_train = _safe_compute(train_ag_auroc_metric)
+        auprc_ag_train = _safe_compute(train_ag_auprc_metric)
+
+        auroc_ab_val = _safe_compute(val_ab_auroc_metric)
+        auprc_ab_val = _safe_compute(val_ab_auprc_metric)
+        auroc_ab_train = _safe_compute(train_ab_auroc_metric)
+        auprc_ab_train = _safe_compute(train_ab_auprc_metric)
 
         if metrics_writer:
             metrics_writer.writerow([
@@ -410,7 +482,15 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
                 round(train_f1, 6), round(train_mcc, 6),
                 round(auroc_train, 6) if not math.isnan(auroc_train) else '',
                 round(auprc_train, 6) if not math.isnan(auprc_train) else '',
-                train_tp, train_fp, train_tn, train_fn
+                train_tp, train_fp, train_tn, train_fn,
+                round(train_ag_precision, 6), round(train_ag_recall, 6), round(train_ag_f1, 6), round(train_ag_mcc, 6),
+                round(auroc_ag_train, 6) if not math.isnan(auroc_ag_train) else '',
+                round(auprc_ag_train, 6) if not math.isnan(auprc_ag_train) else '',
+                train_ag_tp, train_ag_fp, train_ag_tn, train_ag_fn,
+                round(train_ab_precision, 6), round(train_ab_recall, 6), round(train_ab_f1, 6), round(train_ab_mcc, 6),
+                round(auroc_ab_train, 6) if not math.isnan(auroc_ab_train) else '',
+                round(auprc_ab_train, 6) if not math.isnan(auprc_ab_train) else '',
+                train_ab_tp, train_ab_fp, train_ab_tn, train_ab_fn
             ])
             metrics_writer.writerow([
                 epoch, 'val',
@@ -419,7 +499,15 @@ def train_model(train_loader, val_loader, model_ag, model_ab, optimizer, criteri
                 round(val_f1, 6), round(val_mcc, 6),
                 round(auroc_val, 6) if not math.isnan(auroc_val) else '',
                 round(auprc_val, 6) if not math.isnan(auprc_val) else '',
-                val_tp, val_fp, val_tn, val_fn
+                val_tp, val_fp, val_tn, val_fn,
+                round(val_ag_precision, 6), round(val_ag_recall, 6), round(val_ag_f1, 6), round(val_ag_mcc, 6),
+                round(auroc_ag_val, 6) if not math.isnan(auroc_ag_val) else '',
+                round(auprc_ag_val, 6) if not math.isnan(auprc_ag_val) else '',
+                val_ag_tp, val_ag_fp, val_ag_tn, val_ag_fn,
+                round(val_ab_precision, 6), round(val_ab_recall, 6), round(val_ab_f1, 6), round(val_ab_mcc, 6),
+                round(auroc_ab_val, 6) if not math.isnan(auroc_ab_val) else '',
+                round(auprc_ab_val, 6) if not math.isnan(auprc_ab_val) else '',
+                val_ab_tp, val_ab_fp, val_ab_tn, val_ab_fn
             ])
 
         if epoch % 10 == 0:
