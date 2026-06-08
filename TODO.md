@@ -1,0 +1,5 @@
+- [ ] Update `train.py` to force CUDA only (fail fast if no GPU) and remove CPU fallback paths.
+- [ ] In `train.py`, remove the AUROC/AUPRC numpy CPU branch; require torchmetrics GPU branch only.
+- [ ] Update `predict.py` to force CUDA only (fail fast if no GPU) and move ESM tokens/model to GPU.
+- [ ] In `predict.py`, remove `result.to('cpu')` and keep `.cpu()` only for final CSV/heatmap serialization.
+- [ ] Run quick syntax checks / execute train/predict entrypoints to verify no CPU compute path remains.

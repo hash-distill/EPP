@@ -1,4 +1,4 @@
-name: epp
+name: EPP
 channels:
   - pytorch
   - nvidia

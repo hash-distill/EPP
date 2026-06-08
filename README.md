@@ -15,7 +15,7 @@ Clone the repository and install the dependencies:
 git clone https://github.com/qyliii/EPP.git
 cd EPP
 conda env create -f environment.yml
-conda activate epp
+conda activate EPP
 ```
 
 ## Usage

@@ -12,24 +12,28 @@ def main():
     print('Task start time:',
           time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
 
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required (CPU execution is forbidden).")
+
+    device = torch.device("cuda:0")
+    print("Running on the GPU")
+
     agseq, abseq = loadseq()
     dataset = [('agseq', agseq.upper()), ('abseq', abseq.upper())]
 
     # 2. Represent sequence using esm-2
-    # Load ESM-2 model
     model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+    model = model.to(device)
     batch_converter = alphabet.get_batch_converter()
     model.eval()  # disables dropout for deterministic results
 
     print("Sequence characterization begins", end="")
-    # Extract per-residue representations fro each seq
     representations_list = []
     for i in range(len(dataset)):
         data = [dataset[i]]
         batch_labels, batch_strs, batch_tokens = batch_converter(data)
-        batch_lens = (batch_tokens != alphabet.padding_idx).sum(1)
+        batch_tokens = batch_tokens.to(device)
 
-        # Extract per-residue representations (on CPU)
         with torch.no_grad():
             results = model(batch_tokens,
                             repr_layers=[33],
@@ -40,25 +44,14 @@ def main():
     print('\tDone')
 
     # 3. predict
-    model1 = torch.load(
-        './model/model_ag.pth')
-    model2 = torch.load(
-        './model/model_ab.pth')
+    model1 = torch.load('./model/model_ag.pth').to(device)
+    model2 = torch.load('./model/model_ab.pth').to(device)
     model1.eval()
-    model2.eval()  # set eval mode
-
-    if torch.cuda.is_available():
-        device = torch.device(
-            "cuda:0"
-        )  # you can continue going on here, like cuda:1 cuda:2....etc.
-        print("Running on the GPU")
-    else:
-        device = torch.device("cpu")
-        print("Running on the CPU")
+    model2.eval()
 
     # apply model
-    input_sequence1 = representations_list[0].to(device)  # ag feature matrix
-    input_sequence2 = representations_list[1].to(device)  # ab feature matrix
+    input_sequence1 = representations_list[0]  # ag feature matrix (already on GPU)
+    input_sequence2 = representations_list[1]  # ab feature matrix (already on GPU)
     print("Model prediction begins", end="")
     output1 = model1(input_sequence1)
     output2 = model2(input_sequence2)
@@ -70,8 +63,19 @@ def main():
 
     # set threshold
     threshold = 0.5
-    result = result.to('cpu')
-    result_binary = np.where(result >= threshold, 1, 0)
+
+    # Save/visualize requires CPU numpy
+    result_cpu = result.detach().float().cpu()
+
+    import pandas as pd
+    import os
+    os.makedirs("./results", exist_ok=True)
+
+    res_df = pd.DataFrame(result_cpu.numpy())
+    res_df.to_csv("./results/prediction_matrix_scores.csv", index=False, header=False)
+    print(">>> 所有的预测概率矩阵已保存至 ./results/prediction_matrix_scores.csv !!!")
+
+    result_binary = np.where(result_cpu.numpy() >= threshold, 1, 0)
 
     print('threshold: ', threshold)
 
@@ -91,7 +95,17 @@ def main():
     print('predict_paratope: ', predict_paratope)
 
     # 4. visualization
-    # plt(result_binary)
+    import seaborn as sns
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(result_cpu.numpy(), cmap="viridis", cbar=True,
+                xticklabels=False, yticklabels=False)
+    plt.title("Epitope-Paratope Interaction Probability Matrix")
+    plt.xlabel("Antibody Residues")
+    plt.ylabel("Antigen Residues")
+    plt.tight_layout()
+    plt.savefig("./results/prediction_heatmap.png", dpi=300)
+    print(">>> 交互概率矩阵可视化已生成: ./results/prediction_heatmap.png")
+
     print('Task end time::',
           time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
 
